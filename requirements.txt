@@ -1,0 +1,5 @@
+mlx>=0.31.0
+mlx-lm>=0.31.0
+datasets>=4.0.0
+tqdm
+numpy
