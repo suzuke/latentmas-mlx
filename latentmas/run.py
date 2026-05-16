@@ -6,7 +6,7 @@ Usage:
   python mlx_latent_mas.py --method text_mas --model mlx-community/Qwen3-4B-4bit --task gsm8k --max_samples 50
   python mlx_latent_mas.py --method latent_mas --model mlx-community/Qwen3-4B-4bit --task gsm8k --max_samples 50
 """
-import argparse, json, re, time
+import argparse, datetime, json, re, subprocess, time
 from typing import Optional
 
 import mlx.core as mx
@@ -598,7 +598,31 @@ def main():
     p.add_argument("--latent_steps", type=int, default=40)
     p.add_argument("--temp", type=float, default=0.6)
     p.add_argument("--no_compress", action="store_true", help="Disable adaptive KV compression in latent_mas")
+    p.add_argument("--save_outputs", type=str, default=None, help="If set, write per-sample (question, gold, raw_response, pred, ok) as JSONL to this path")
     args = p.parse_args()
+
+    out_file = open(args.save_outputs, "w") if args.save_outputs else None
+    if out_file is not None:
+        try:
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            git_commit = "unknown"
+        out_file.write(json.dumps({
+            "_meta": True,
+            "method": args.method,
+            "model": args.model,
+            "task": args.task,
+            "max_samples": args.max_samples,
+            "max_tokens": args.max_tokens,
+            "latent_steps": args.latent_steps,
+            "temp": args.temp,
+            "no_compress": args.no_compress,
+            "git_commit": git_commit,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }, ensure_ascii=False) + "\n")
+        out_file.flush()
 
     print(f"Loading {args.model}...")
     model, tokenizer = mlx_lm.load(args.model)
@@ -610,30 +634,47 @@ def main():
     total_time = 0
     total_out_tokens = 0
 
-    for i, item in enumerate(data):
-        t0 = time.time()
+    try:
+        for i, item in enumerate(data):
+            t0 = time.time()
 
-        if args.method == "baseline":
-            resp, _ = run_baseline(model, tokenizer, item["question"], args.task, args.max_tokens)
-        elif args.method == "text_mas":
-            resp, _ = run_text_mas(model, tokenizer, item["question"], args.task, args.max_tokens)
-        elif args.method == "latent_mas":
-            resp, _ = run_latent_mas(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, adaptive_compress=not args.no_compress)
-        elif args.method == "latent_mas_obf":
-            resp, _ = run_latent_mas_obf(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, keep_k=32)
+            if args.method == "baseline":
+                resp, _ = run_baseline(model, tokenizer, item["question"], args.task, args.max_tokens)
+            elif args.method == "text_mas":
+                resp, _ = run_text_mas(model, tokenizer, item["question"], args.task, args.max_tokens)
+            elif args.method == "latent_mas":
+                resp, _ = run_latent_mas(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, adaptive_compress=not args.no_compress)
+            elif args.method == "latent_mas_obf":
+                resp, _ = run_latent_mas_obf(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, keep_k=32)
 
-        elapsed = time.time() - t0
-        total_time += elapsed
+            elapsed = time.time() - t0
+            total_time += elapsed
 
-        out_tokens = len(tokenizer.encode(resp))
-        total_out_tokens += out_tokens
+            out_tokens = len(tokenizer.encode(resp))
+            total_out_tokens += out_tokens
 
-        pred = extract_answer(resp, args.task)
-        gold = item["gold"]
-        ok = _numeric_equal(pred, gold)
-        correct += ok
+            pred = extract_answer(resp, args.task)
+            gold = item["gold"]
+            ok = _numeric_equal(pred, gold)
+            correct += ok
 
-        print(f"  [{i+1}/{len(data)}] {'✓' if ok else '✗'} pred={pred} gold={gold} time={elapsed:.1f}s tokens={out_tokens}")
+            print(f"  [{i+1}/{len(data)}] {'✓' if ok else '✗'} pred={pred} gold={gold} time={elapsed:.1f}s tokens={out_tokens}")
+
+            if out_file is not None:
+                out_file.write(json.dumps({
+                    "index": i,
+                    "question": item["question"],
+                    "gold": gold,
+                    "raw_response": resp,
+                    "extracted_pred": pred,
+                    "correct": bool(ok),
+                    "elapsed_sec": round(elapsed, 2),
+                    "out_tokens": out_tokens,
+                }, ensure_ascii=False) + "\n")
+                out_file.flush()
+    finally:
+        if out_file is not None:
+            out_file.close()
 
     acc = correct / len(data)
     avg_time = total_time / len(data)
