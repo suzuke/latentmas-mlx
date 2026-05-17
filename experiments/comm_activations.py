@@ -14,6 +14,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx_lm
 from mlx_lm.generate import generate_step, cache as mlx_cache
+from mlx_lm.models.base import create_attention_mask
 from datasets import load_dataset
 
 
@@ -27,7 +28,10 @@ def get_activation_at_layer(model, input_ids, layer_idx):
     h = inner.embed_tokens(input_ids[None])
 
     cache = [None] * len(inner.layers)
-    mask = None  # No cache, full attention
+    # Causal mask is required for prefill (N>1 tokens); without it every
+    # prompt token attends to every other token including future ones,
+    # which is OOD for the causally-trained model.
+    mask = create_attention_mask(h, cache[0])
 
     for i, layer in enumerate(inner.layers):
         if i > layer_idx:
@@ -52,24 +56,28 @@ def generate_with_grafted_activation(
     n_layers = len(inner.layers)
 
     # Step 1: Run A — generate a short completion to get its "thinking"
-    # Use the full model forward to get activation at graft_layer
+    # Use the full model forward to get activation at graft_layer.
+    # Causal mask required for prefill (otherwise tokens see future = OOD).
     h = inner.embed_tokens(input_ids[None])
     cache_a = [None] * n_layers
+    mask_a = create_attention_mask(h, cache_a[0])
     activations = {}
     for i, layer in enumerate(inner.layers):
-        h = layer(h, None, cache_a[i])
+        h = layer(h, mask_a, cache_a[i])
         if i == graft_layer:
             activations[i] = h[0, -1]  # [d_h] — A's activation at graft layer
 
     grafted = activations[graft_layer]
 
     # Step 2: Run B with the grafted activation
-    # Fresh forward, but at graft_layer replace last-token activation
+    # Fresh forward, but at graft_layer replace last-token activation.
+    # Same causal mask requirement applies.
     h = inner.embed_tokens(input_ids[None])
     kv_cache = mlx_cache.make_prompt_cache(model)
+    mask_b = create_attention_mask(h, kv_cache[0])
 
     for i, (layer, c) in enumerate(zip(inner.layers, kv_cache)):
-        h = layer(h, None, c)
+        h = layer(h, mask_b, c)
         if i == graft_layer:
             # Replace last token activation: h[:, -1, :] = grafted
             # MLX doesn't have .at indexing, use concatenation
