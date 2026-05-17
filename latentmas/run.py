@@ -202,11 +202,20 @@ def _embedding_target_norm(model) -> mx.array:
     Gen-Verse/LatentMAS repo). The MLX port previously omitted this step,
     causing hidden state magnitude to drift over many latent iterations
     and pushing the model into out-of-distribution input territory.
+
+    Note: for quantized models (e.g. 4-bit), `embed_tokens.weight` is the
+    packed uint32 representation, not the actual fp16 weight. We call
+    `embed_tokens(...)` on all vocab IDs to dequantize before computing
+    norms. This works correctly for both quantized and non-quantized
+    embeddings.
     """
     inner = _get_inner_model(model)
-    embed_w = inner.embed_tokens.weight.astype(mx.float32)
+    embed = inner.embed_tokens
+    vocab_size = embed.weight.shape[0]
+    all_ids = mx.arange(vocab_size)
+    all_embs = embed(all_ids).astype(mx.float32)
     # row-wise L2 norm then mean
-    target = mx.mean(mx.linalg.norm(embed_w, axis=1))
+    target = mx.mean(mx.linalg.norm(all_embs, axis=-1))
     mx.eval(target)
     return target
 
