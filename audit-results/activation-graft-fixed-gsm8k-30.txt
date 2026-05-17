@@ -1,0 +1,36 @@
+Run: experiments/comm_activations.py FIXED (causal mask added to prefill)
+Model: mlx-community/Qwen3-8B-4bit (same for A and B)
+Task: GSM8K 30 samples, max_tokens=2048, temp=0.6, graft_layer=26
+Date: 2026-05-18
+
+Results:
+  model_a_only:     80.00% (24/30), avg 35.15s/sample
+  model_b_only:     90.00% (27/30), avg 36.31s/sample
+  activation_graft: 83.33% (25/30), avg 35.38s/sample  <-- FIXED
+
+Single-model baseline average: 85.0%
+Fixed graft: 83.33% — ESSENTIALLY EQUAL to baseline.
+
+Comparison with broken:
+                  | Broken | Fixed | Δ
+  model_a_only    | 83.3%  | 80.0% | -3.3pp (noise)
+  model_b_only    | 86.7%  | 90.0% | +3.3pp (noise)
+  activation_graft| 60.0%  | 83.3% | +23.3pp  ✓ recovered
+  single avg      | 85.0%  | 85.0% | 0pp
+  graft - single  | -25pp  | -1.7pp | recovered
+
+Source raw output:
+{"method": "model_a_only",     "samples": 30, "accuracy": 0.80,   "correct": 24, "avg_time_sec": 35.15}
+{"method": "model_b_only",     "samples": 30, "accuracy": 0.90,   "correct": 27, "avg_time_sec": 36.31}
+{"method": "activation_graft", "samples": 30, "accuracy": 0.8333, "correct": 25, "avg_time_sec": 35.38}
+
+INTERPRETATION:
+The fix (adding causal mask via create_attention_mask) eliminates the
+-25pp regression of same-model activation graft. Fixed graft accuracy
+≈ single-model baseline, matching the mathematical expectation that
+same-model graft = no-op when prefill is correct.
+
+This is the cleanest of the three bug fixes:
+- Bug 1 (norm rescaling): mixed — removes catastrophic failures but slight avg acc cost
+- Bug 2 (causal mask): clean — full recovery, no observed side effects
+- Bug 3 (RecursiveMAS norm): suggestive — +6.7pp in noise band at n=30
