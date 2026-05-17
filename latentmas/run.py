@@ -194,10 +194,42 @@ def _get_hidden_and_logits(model, tokens_or_embeds, kv_cache, is_embed=False):
     return h
 
 
-def latent_steps(model, prompt_ids, kv_cache, n_steps=20):
+def _embedding_target_norm(model) -> mx.array:
+    """Compute the mean L2 norm of the embedding rows.
+
+    The original LatentMAS rescales every fed-back hidden state to this
+    target via `_apply_latent_realignment` (models.py:204-211 in the
+    Gen-Verse/LatentMAS repo). The MLX port previously omitted this step,
+    causing hidden state magnitude to drift over many latent iterations
+    and pushing the model into out-of-distribution input territory.
+    """
+    inner = _get_inner_model(model)
+    embed_w = inner.embed_tokens.weight.astype(mx.float32)
+    # row-wise L2 norm then mean
+    target = mx.mean(mx.linalg.norm(embed_w, axis=1))
+    mx.eval(target)
+    return target
+
+
+def _rescale_to_target_norm(h: mx.array, target_norm: mx.array) -> mx.array:
+    """Rescale last-axis vectors of h to have norm == target_norm."""
+    h_fp32 = h.astype(mx.float32)
+    h_norm = mx.linalg.norm(h_fp32, axis=-1, keepdims=True)
+    h_norm = mx.maximum(h_norm, mx.array(1e-6, dtype=mx.float32))
+    rescaled = h_fp32 * (target_norm / h_norm)
+    return rescaled.astype(h.dtype)
+
+
+def latent_steps(model, prompt_ids, kv_cache, n_steps=20, target_norm=None):
     """Run n latent steps: feed hidden states back as input embeddings, accumulating KV cache.
-    Returns (kv_cache, prompt_token_count) where prompt_token_count is the number of
-    prompt tokens added to the cache (before latent steps)."""
+
+    Now applies norm rescaling each iteration to match the original
+    LatentMAS algorithm (see _embedding_target_norm docstring).
+    Pass `target_norm` precomputed to avoid recomputing per agent.
+    """
+    if target_norm is None:
+        target_norm = _embedding_target_norm(model)
+
     # Prefill prompt into cache
     _get_hidden_and_logits(model, prompt_ids[None], kv_cache)
     mx.eval([c.state for c in kv_cache if hasattr(c, 'state')])
@@ -206,6 +238,10 @@ def latent_steps(model, prompt_ids, kv_cache, n_steps=20):
         if _ == 0:
             h = _get_hidden_and_logits(model, mx.array([[0]]), kv_cache)
         else:
+            # Rescale h from previous iteration to target embedding norm
+            # before feeding it back as inputs_embeds. This matches the
+            # original PyTorch implementation's _apply_latent_realignment.
+            h = _rescale_to_target_norm(h, target_norm)
             h = _get_hidden_and_logits(model, h, kv_cache, is_embed=True)
         mx.eval([c.state for c in kv_cache if hasattr(c, 'state')])
 

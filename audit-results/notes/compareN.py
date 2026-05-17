@@ -19,6 +19,7 @@ FILES = {
     "lat_bf16_nocomp":   AUDIT / "latent_mas-gsm8k-50-bf16-nocompress.jsonl",
     "base_4bit":         AUDIT / "baseline-gsm8k-50-4bit.jsonl",
     "lat_4bit_obf":      AUDIT / "latent_mas-gsm8k-50-4bit.jsonl",
+    "lat_bf16_FIXED":    AUDIT / "latent_mas-gsm8k-50-bf16-fixed.jsonl",
 }
 
 
