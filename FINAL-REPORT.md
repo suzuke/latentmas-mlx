@@ -17,9 +17,9 @@ had**.
 
 | # | Bug | File | Fix | Verification |
 |---|-----|------|-----|--------------|
-| 1 | Missing norm rescaling in latent step feedback | `latentmas/run.py` | +25 lines | **n=1319**: mode collapse 6% → 0.23% (25× reduction); avg accuracy roughly unchanged |
-| 2 | Missing causal mask in manual prefill | `experiments/comm_activations.py` | +3 lines | n=30 broken-vs-fixed run in progress |
-| 3 | Pre-final-norm hidden state returned to adapter | `recursive_mas/run.py` | +1 line | **n=30**: +6.7pp (within noise; needs n≥100 to settle) |
+| 1 | Missing norm rescaling in latent step feedback | `latentmas/run.py` | +25 lines | **n=1319**: mode collapse 6% → 0.23% (25× reduction); avg accuracy 92.2% → 90.3% (trade-off) |
+| 2 | Missing causal mask in manual prefill | `experiments/comm_activations.py` | +3 lines | **n=30**: graft 60% → 83.3% (+23.3pp, full recovery to baseline) |
+| 3 | Pre-final-norm hidden state returned to adapter | `recursive_mas/run.py` | +1 line | n=30: 23.3% → 30.0% (+6.7pp, within noise; needs n≥100) |
 
 **Key honest correction from the earlier report**: the LatentMAS fix
 was originally claimed as "+10pp accuracy". At full 1319-sample scale,
@@ -133,11 +133,23 @@ the prefill is correct.
 Three lines: import `create_attention_mask` + compute mask twice +
 pass mask to layers.
 
-### Verification status
+### Verification (n=30 GSM8K Qwen3-8B-4bit)
 
-In progress at time of writing (Qwen3-8B-4bit GSM8K 30 samples).
-Predicted: same-model graft accuracy ≈ baseline (~90%), recovering
-from broken's 47%.
+| Method | Broken | Fixed |
+|--------|--------|-------|
+| model_a_only | 83.3% | 80.0% |
+| model_b_only | 86.7% | 90.0% |
+| **activation_graft** | **60.0%** | **83.3%** |
+| Single-model avg | 85.0% | 85.0% |
+| **Graft regression** | **-25pp** | **-1.7pp** (within noise) |
+
+**Bug definitively confirmed**: same-model graft should be a no-op
+(activation captured = activation recomputed, replacement = identity),
+so fixed graft must match single-model accuracy. It does (-1.7pp is
+within sampling noise). Fix recovers +23.3pp — the cleanest of the
+three fixes.
+
+See MILESTONE-7-graft-fix-verified.md for full data.
 
 ---
 
