@@ -194,8 +194,24 @@ def _get_inner(model):
 
 
 def _forward_get_raw_hidden(model, input_embeds):
-    """Run model forward and return raw hidden state (before final norm).
-    Computes in float32 for numerical accuracy matching PyTorch."""
+    """Run model forward and return POST-norm hidden state.
+
+    Matches the original PyTorch RecursiveMAS (inference_mas.py:868-869):
+        outputs = model(..., output_hidden_states=True, ...)
+        last_hidden = outputs.hidden_states[-1][:, -1, :]
+
+    In modern HuggingFace transformers (Qwen2/Qwen3/LLaMA), the LAST
+    entry of `outputs.hidden_states` is appended AFTER `self.norm` —
+    i.e. it is POST-final-norm. The InnerLink adapter is trained on
+    these POST-norm features.
+
+    Previous version of this function omitted `inner.norm` and returned
+    PRE-norm, causing a distribution shift at the adapter's input that
+    compounds across the ~40 latent_steps iterations.
+    See audit-results/MILESTONE-5-recursivemas-norm.md.
+
+    Computes in float32 for numerical accuracy.
+    """
     inner = _get_inner(model)
     h = input_embeds.astype(mx.float32)
     cache = [None] * len(inner.layers)
@@ -218,12 +234,15 @@ def _forward_get_raw_hidden(model, input_embeds):
         h = layer(h, mask, c)
         h = h.astype(mx.float32)  # keep float32 between layers
 
+    # Apply final norm to match HF's hidden_states[-1] convention.
+    h = inner.norm(h).astype(mx.float32)
     return h
 
 
 def latent_rollout(model, inner_adapter, input_embeds, n_steps):
     """Autoregressive latent rollout with InnerLink.
-    Collects raw hidden states (pre-norm), matching HuggingFace hidden_states[-1].
+    Collects POST-norm hidden states, matching HuggingFace
+    `outputs.hidden_states[-1]` (post-final-norm).
     """
     hidden_states = []
 
