@@ -1,0 +1,21 @@
+Loading Model A: mlx-community/Qwen3-1.7B-4bit...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 8921.94it/s]
+Loading Model B: mlx-community/Qwen3-4B-4bit...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 12765.89it/s]
+Model A: hidden=2048, n_layers=28
+Model B: hidden=2560, n_layers=36
+Computing SVD alignment matrix (rank=full)...
+  Alignment T shape: (2048, 2560)
+Will run cross_model_graft (align=svd, cross-arch 2048->2560): A.layer[23] -> B.layer[30]
+  [model_a_only] 10/30 acc=6/10 time=4.6s
+  [model_a_only] 20/30 acc=15/20 time=7.4s
+  [model_a_only] 30/30 acc=22/30 time=9.1s
+{"method": "model_a_only", "task": "gsm8k", "samples": 30, "accuracy": 0.7333, "correct": 22, "avg_time_sec": 5.65, "total_time_sec": 169.38}
+  [model_b_only] 10/30 acc=7/10 time=7.5s
+  [model_b_only] 20/30 acc=16/20 time=10.9s
+  [model_b_only] 30/30 acc=26/30 time=7.3s
+{"method": "model_b_only", "task": "gsm8k", "samples": 30, "accuracy": 0.8667, "correct": 26, "avg_time_sec": 10.74, "total_time_sec": 322.13}
+  [cross_model_graft] 10/30 acc=9/10 time=8.4s
+  [cross_model_graft] 20/30 acc=18/20 time=11.0s
+  [cross_model_graft] 30/30 acc=27/30 time=6.7s
+{"method": "cross_model_graft", "task": "gsm8k", "samples": 30, "accuracy": 0.9, "correct": 27, "avg_time_sec": 9.71, "total_time_sec": 291.38}
