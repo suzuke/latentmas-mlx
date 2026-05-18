@@ -22,6 +22,25 @@ SYSTEM = "You are a helpful assistant."
 
 # ── Cross-LoRA-style SVD subspace alignment ──────────────
 
+def compute_random_alignment_matrix(d_a, d_b, seed=42):
+    """Random orthogonal matrix for control / ablation.
+
+    Generates a random orthogonal-style projection matrix of shape [d_a, d_b]
+    via SVD of a random Gaussian. Same structural properties as the SVD-derived
+    alignment (orthogonal-like) but with NO model-derived information — useful
+    to test whether SVD alignment is doing meaningful work or whether any
+    rotation suffices.
+    """
+    d = max(d_a, d_b)
+    key = mx.random.key(seed)
+    M = mx.random.normal((d, d), key=key)
+    U, _, Vh = mx.linalg.svd(M, stream=mx.cpu)
+    R = mx.matmul(U, Vh)  # orthogonal d×d
+    T = R[:d_a, :d_b]
+    mx.eval(T)
+    return T
+
+
 def compute_svd_alignment_matrix(model_a, model_b, n_sample=8192, rank=None):
     """Compute T (d_a × d_b) such that h_a @ T approximately maps Model A's
     activation space onto Model B's, via Cross-LoRA-style SVD subspace
@@ -321,8 +340,9 @@ def main():
                    help="Layer in Model A to capture activation (cross-model). Defaults to --graft_layer")
     p.add_argument("--graft_layer_b", type=int, default=None,
                    help="Layer in Model B to inject activation (cross-model). Defaults to --graft_layer")
-    p.add_argument("--align", choices=["none", "svd"], default="none",
-                   help="Cross-model alignment method (only used when models differ)")
+    p.add_argument("--align", choices=["none", "svd", "random"], default="none",
+                   help="Cross-model alignment method (only used when models differ). "
+                        "'random' is a control / ablation using a random orthogonal matrix.")
     p.add_argument("--svd_rank", type=int, default=None,
                    help="Truncation rank for SVD alignment (default: full hidden_size)")
     p.add_argument("--temp", type=float, default=0.6)
@@ -359,6 +379,10 @@ def main():
         print(f"Computing SVD alignment matrix (rank={args.svd_rank or 'full'})...")
         align_matrix = compute_svd_alignment_matrix(model_a, model_b, rank=args.svd_rank)
         print(f"  Alignment T shape: {align_matrix.shape}")
+    elif is_cross_model and args.align == "random":
+        print(f"Computing RANDOM orthogonal alignment matrix (control / ablation)...")
+        align_matrix = compute_random_alignment_matrix(hidden_a, hidden_b)
+        print(f"  Random T shape: {align_matrix.shape}")
 
     # Decide which methods to run
     methods = ["model_a_only", "model_b_only"]
@@ -370,12 +394,12 @@ def main():
             methods.append("cross_model_graft")
             method_suffix = f" (align={args.align})" if args.align != "none" else ""
             print(f"Will run cross_model_graft{method_suffix}: A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
-        elif args.align == "svd":
+        elif args.align in ("svd", "random"):
             methods.append("cross_model_graft")
-            print(f"Will run cross_model_graft (align=svd, cross-arch {hidden_a}->{hidden_b}): A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
+            print(f"Will run cross_model_graft (align={args.align}, cross-arch {hidden_a}->{hidden_b}): A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
         else:
             print(f"⚠ Skipping cross_model_graft: hidden sizes differ ({hidden_a} vs {hidden_b}) and --align=none")
-            print("  Use --align svd to enable cross-arch projection.")
+            print("  Use --align svd|random to enable cross-arch projection.")
     else:
         methods.append("activation_graft")
         print(f"Will run same-model activation_graft at layer {args.graft_layer}")
