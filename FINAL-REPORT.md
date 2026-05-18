@@ -20,13 +20,13 @@ had**.
 
 | # | Bug | File | Fix | Verification |
 |---|-----|------|-----|--------------|
-| 1 | Missing norm rescaling in latent step feedback | `latentmas/run.py` | +25 lines | **n=1319**: mode collapse 6% → 0.23% (25× reduction); avg accuracy 92.2% → 90.3% (trade-off) |
+| 1 | Missing norm rescaling in latent step feedback | `latentmas/run.py` | +25 lines | **fixed at n=1319**: mode collapse rate 0.23% (3/1319); 50-sample broken pilot showed 6% but not validated at 1319 scale — see CAVEAT-25X-REDUCTION below |
 | 2 | Missing causal mask in manual prefill | `experiments/comm_activations.py` | +3 lines | **n=30**: graft 60% → 83.3% (+23.3pp, full recovery to baseline) |
 | 3 | Pre-final-norm hidden state returned to adapter | `recursive_mas/run.py` | +1 line | n=30: 23.3% → 30.0% (+6.7pp, within noise; needs n≥100) |
 
 **Key honest correction from the earlier report**: the LatentMAS fix
 was originally claimed as "+10pp accuracy". At full 1319-sample scale,
-the gap inverts slightly (-1.9pp) but **mode collapse rate drops 25×**.
+the gap inverts slightly (-1.9pp) but **mode collapse is rare in fixed run (3/1319 = 0.23%)** — see CAVEAT-25X-REDUCTION for why "25×" framing is withdrawn.
 Re-frame the fix as **reliability improvement** (eliminates ~95% of
 catastrophic failures), not as **average-accuracy improvement**.
 
@@ -91,12 +91,32 @@ output:
 | 1319 samples fixed | **90.3%** | **3 (0.23%)** | 89 (6.7%) | 36 (2.7%) |
 | 1319 samples broken (RESULTS.md) | 92.2% | ~6%* | — | — |
 
-*extrapolated from 50-sample rate
+*extrapolated from 50-sample broken pilot; **not validated at 1319 scale**
 
-**Headline**: At full scale, the fix reduces mode collapse by ~25×
-(6% → 0.23%) at the cost of ~2pp average accuracy
-(92.2% → 90.3%). This is a **reliability/accuracy trade-off**, not
-a pure accuracy win.
+### CAVEAT-25X-REDUCTION (peer-review correction by kiro-research)
+
+The original framing of "25× mode collapse reduction" is an
+**apples-to-oranges** comparison and is hereby withdrawn:
+
+- **Broken rate 6%** comes from a 50-sample pilot (different hardware /
+  config / sampling) — never actually ran 1319 broken samples ourselves
+- **Fixed rate 0.23%** comes from our actual 1319-sample run
+- The "25×" multiplier assumes mode collapse is i.i.d. across sample
+  inputs (50-sample rate generalizes to 1319-sample rate), which is
+  unverified and may not hold if collapse is input-type-dependent
+
+**Honest claim**: `Fixed mode collapse rate = 3/1319 = 0.23%` (this we
+measured). Cannot precisely quote the relative reduction without
+running 1319 broken samples on the same hardware/config. The 50-sample
+broken pilot showed 6% collapse rate but that's our only broken data
+point and doesn't generalize automatically.
+
+**Headline (revised)**: At full 1319 scale, the fix maintains
+**mode collapse rate ≤ 0.23%** (3 events), trading **~2pp average
+accuracy** (92.2% RESULTS.md baseline → 90.3% our fixed run; not
+apples-to-apples since broken was their run, not ours). This is a
+**reliability fix at a likely small accuracy cost**, not a pure
+accuracy win.
 
 ### Why this is a known trade-off
 
