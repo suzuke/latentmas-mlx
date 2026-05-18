@@ -1,0 +1,21 @@
+Loading Model A: mlx-community/Qwen3-1.7B-4bit...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 16036.00it/s]
+Loading Model B: mlx-community/Qwen3-4B-4bit...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 18641.35it/s]
+Model A: hidden=2048, n_layers=28
+Model B: hidden=2560, n_layers=36
+Computing RANDOM orthogonal alignment matrix (control / ablation)...
+  Random T shape: (2048, 2560)
+Will run cross_model_graft (align=random, cross-arch 2048->2560): A.layer[23] -> B.layer[30]
+  [model_a_only] 10/30 acc=5/10 time=5.3s
+  [model_a_only] 20/30 acc=14/20 time=5.9s
+  [model_a_only] 30/30 acc=23/30 time=9.2s
+{"method": "model_a_only", "task": "gsm8k", "samples": 30, "accuracy": 0.7667, "correct": 23, "avg_time_sec": 5.83, "total_time_sec": 174.77}
+  [model_b_only] 10/30 acc=8/10 time=7.3s
+  [model_b_only] 20/30 acc=17/20 time=15.6s
+  [model_b_only] 30/30 acc=27/30 time=6.8s
+{"method": "model_b_only", "task": "gsm8k", "samples": 30, "accuracy": 0.9, "correct": 27, "avg_time_sec": 11.81, "total_time_sec": 354.24}
+  [cross_model_graft] 10/30 acc=8/10 time=10.1s
+  [cross_model_graft] 20/30 acc=17/20 time=12.1s
+  [cross_model_graft] 30/30 acc=27/30 time=8.8s
+{"method": "cross_model_graft", "task": "gsm8k", "samples": 30, "accuracy": 0.9, "correct": 27, "avg_time_sec": 11.23, "total_time_sec": 336.8}
