@@ -6,7 +6,7 @@ Usage:
   python mlx_latent_mas.py --method text_mas --model mlx-community/Qwen3-4B-4bit --task gsm8k --max_samples 50
   python mlx_latent_mas.py --method latent_mas --model mlx-community/Qwen3-4B-4bit --task gsm8k --max_samples 50
 """
-import argparse, json, re, time
+import argparse, datetime, json, re, subprocess, time
 from typing import Optional
 
 import mlx.core as mx
@@ -194,10 +194,51 @@ def _get_hidden_and_logits(model, tokens_or_embeds, kv_cache, is_embed=False):
     return h
 
 
-def latent_steps(model, prompt_ids, kv_cache, n_steps=20):
+def _embedding_target_norm(model) -> mx.array:
+    """Compute the mean L2 norm of the embedding rows.
+
+    The original LatentMAS rescales every fed-back hidden state to this
+    target via `_apply_latent_realignment` (models.py:204-211 in the
+    Gen-Verse/LatentMAS repo). The MLX port previously omitted this step,
+    causing hidden state magnitude to drift over many latent iterations
+    and pushing the model into out-of-distribution input territory.
+
+    Note: for quantized models (e.g. 4-bit), `embed_tokens.weight` is the
+    packed uint32 representation, not the actual fp16 weight. We call
+    `embed_tokens(...)` on all vocab IDs to dequantize before computing
+    norms. This works correctly for both quantized and non-quantized
+    embeddings.
+    """
+    inner = _get_inner_model(model)
+    embed = inner.embed_tokens
+    vocab_size = embed.weight.shape[0]
+    all_ids = mx.arange(vocab_size)
+    all_embs = embed(all_ids).astype(mx.float32)
+    # row-wise L2 norm then mean
+    target = mx.mean(mx.linalg.norm(all_embs, axis=-1))
+    mx.eval(target)
+    return target
+
+
+def _rescale_to_target_norm(h: mx.array, target_norm: mx.array) -> mx.array:
+    """Rescale last-axis vectors of h to have norm == target_norm."""
+    h_fp32 = h.astype(mx.float32)
+    h_norm = mx.linalg.norm(h_fp32, axis=-1, keepdims=True)
+    h_norm = mx.maximum(h_norm, mx.array(1e-6, dtype=mx.float32))
+    rescaled = h_fp32 * (target_norm / h_norm)
+    return rescaled.astype(h.dtype)
+
+
+def latent_steps(model, prompt_ids, kv_cache, n_steps=20, target_norm=None):
     """Run n latent steps: feed hidden states back as input embeddings, accumulating KV cache.
-    Returns (kv_cache, prompt_token_count) where prompt_token_count is the number of
-    prompt tokens added to the cache (before latent steps)."""
+
+    Now applies norm rescaling each iteration to match the original
+    LatentMAS algorithm (see _embedding_target_norm docstring).
+    Pass `target_norm` precomputed to avoid recomputing per agent.
+    """
+    if target_norm is None:
+        target_norm = _embedding_target_norm(model)
+
     # Prefill prompt into cache
     _get_hidden_and_logits(model, prompt_ids[None], kv_cache)
     mx.eval([c.state for c in kv_cache if hasattr(c, 'state')])
@@ -206,6 +247,10 @@ def latent_steps(model, prompt_ids, kv_cache, n_steps=20):
         if _ == 0:
             h = _get_hidden_and_logits(model, mx.array([[0]]), kv_cache)
         else:
+            # Rescale h from previous iteration to target embedding norm
+            # before feeding it back as inputs_embeds. This matches the
+            # original PyTorch implementation's _apply_latent_realignment.
+            h = _rescale_to_target_norm(h, target_norm)
             h = _get_hidden_and_logits(model, h, kv_cache, is_embed=True)
         mx.eval([c.state for c in kv_cache if hasattr(c, 'state')])
 
@@ -598,7 +643,31 @@ def main():
     p.add_argument("--latent_steps", type=int, default=40)
     p.add_argument("--temp", type=float, default=0.6)
     p.add_argument("--no_compress", action="store_true", help="Disable adaptive KV compression in latent_mas")
+    p.add_argument("--save_outputs", type=str, default=None, help="If set, write per-sample (question, gold, raw_response, pred, ok) as JSONL to this path")
     args = p.parse_args()
+
+    out_file = open(args.save_outputs, "w") if args.save_outputs else None
+    if out_file is not None:
+        try:
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            git_commit = "unknown"
+        out_file.write(json.dumps({
+            "_meta": True,
+            "method": args.method,
+            "model": args.model,
+            "task": args.task,
+            "max_samples": args.max_samples,
+            "max_tokens": args.max_tokens,
+            "latent_steps": args.latent_steps,
+            "temp": args.temp,
+            "no_compress": args.no_compress,
+            "git_commit": git_commit,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }, ensure_ascii=False) + "\n")
+        out_file.flush()
 
     print(f"Loading {args.model}...")
     model, tokenizer = mlx_lm.load(args.model)
@@ -610,30 +679,47 @@ def main():
     total_time = 0
     total_out_tokens = 0
 
-    for i, item in enumerate(data):
-        t0 = time.time()
+    try:
+        for i, item in enumerate(data):
+            t0 = time.time()
 
-        if args.method == "baseline":
-            resp, _ = run_baseline(model, tokenizer, item["question"], args.task, args.max_tokens)
-        elif args.method == "text_mas":
-            resp, _ = run_text_mas(model, tokenizer, item["question"], args.task, args.max_tokens)
-        elif args.method == "latent_mas":
-            resp, _ = run_latent_mas(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, adaptive_compress=not args.no_compress)
-        elif args.method == "latent_mas_obf":
-            resp, _ = run_latent_mas_obf(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, keep_k=32)
+            if args.method == "baseline":
+                resp, _ = run_baseline(model, tokenizer, item["question"], args.task, args.max_tokens)
+            elif args.method == "text_mas":
+                resp, _ = run_text_mas(model, tokenizer, item["question"], args.task, args.max_tokens)
+            elif args.method == "latent_mas":
+                resp, _ = run_latent_mas(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, adaptive_compress=not args.no_compress)
+            elif args.method == "latent_mas_obf":
+                resp, _ = run_latent_mas_obf(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, keep_k=32)
 
-        elapsed = time.time() - t0
-        total_time += elapsed
+            elapsed = time.time() - t0
+            total_time += elapsed
 
-        out_tokens = len(tokenizer.encode(resp))
-        total_out_tokens += out_tokens
+            out_tokens = len(tokenizer.encode(resp))
+            total_out_tokens += out_tokens
 
-        pred = extract_answer(resp, args.task)
-        gold = item["gold"]
-        ok = _numeric_equal(pred, gold)
-        correct += ok
+            pred = extract_answer(resp, args.task)
+            gold = item["gold"]
+            ok = _numeric_equal(pred, gold)
+            correct += ok
 
-        print(f"  [{i+1}/{len(data)}] {'✓' if ok else '✗'} pred={pred} gold={gold} time={elapsed:.1f}s tokens={out_tokens}")
+            print(f"  [{i+1}/{len(data)}] {'✓' if ok else '✗'} pred={pred} gold={gold} time={elapsed:.1f}s tokens={out_tokens}")
+
+            if out_file is not None:
+                out_file.write(json.dumps({
+                    "index": i,
+                    "question": item["question"],
+                    "gold": gold,
+                    "raw_response": resp,
+                    "extracted_pred": pred,
+                    "correct": bool(ok),
+                    "elapsed_sec": round(elapsed, 2),
+                    "out_tokens": out_tokens,
+                }, ensure_ascii=False) + "\n")
+                out_file.flush()
+    finally:
+        if out_file is not None:
+            out_file.close()
 
     acc = correct / len(data)
     avg_time = total_time / len(data)
