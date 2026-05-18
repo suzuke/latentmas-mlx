@@ -229,12 +229,17 @@ def _rescale_to_target_norm(h: mx.array, target_norm: mx.array) -> mx.array:
     return rescaled.astype(h.dtype)
 
 
-def latent_steps(model, prompt_ids, kv_cache, n_steps=20, target_norm=None):
+def latent_steps(model, prompt_ids, kv_cache, n_steps=20, target_norm=None,
+                 capture_buffer=None):
     """Run n latent steps: feed hidden states back as input embeddings, accumulating KV cache.
 
     Now applies norm rescaling each iteration to match the original
     LatentMAS algorithm (see _embedding_target_norm docstring).
     Pass `target_norm` precomputed to avoid recomputing per agent.
+
+    If `capture_buffer` is a list, each step's last-token hidden state
+    is appended (post-rescale-if-applicable, pre-feedback). Used for
+    activation analysis (MILESTONE-12).
     """
     if target_norm is None:
         target_norm = _embedding_target_norm(model)
@@ -253,6 +258,12 @@ def latent_steps(model, prompt_ids, kv_cache, n_steps=20, target_norm=None):
             h = _rescale_to_target_norm(h, target_norm)
             h = _get_hidden_and_logits(model, h, kv_cache, is_embed=True)
         mx.eval([c.state for c in kv_cache if hasattr(c, 'state')])
+        if capture_buffer is not None:
+            # h has shape [1, 1, d_model]; save last-token vector as float32 numpy
+            import numpy as np
+            h_last = h[0, -1, :].astype(mx.float32)
+            mx.eval(h_last)
+            capture_buffer.append(np.array(h_last))
 
     return kv_cache
 
@@ -535,7 +546,11 @@ def run_text_mas(model, tokenizer, question, task, max_tokens):
     total_tokens += len(tokenizer.encode(resp))
     return resp, total_tokens
 
-def run_latent_mas(model, tokenizer, question, task, max_tokens, n_latent=20, adaptive_compress=True):
+def run_latent_mas(model, tokenizer, question, task, max_tokens, n_latent=20,
+                   adaptive_compress=True, capture_buffer=None):
+    """Run LatentMAS pipeline. If `capture_buffer` is a dict-like with role
+    keys, per-agent latent-step activations get captured into it under
+    keys 'planner', 'critic', 'refiner'."""
     kv = mlx_cache.make_prompt_cache(model)
 
     for role in ["planner", "critic", "refiner"]:
@@ -543,7 +558,11 @@ def run_latent_mas(model, tokenizer, question, task, max_tokens, n_latent=20, ad
         _, ids = _chat(tokenizer, msgs)
         prompt_len = len(ids)
         prompt_start = kv[0].offset
-        kv = latent_steps(model, ids, kv, n_steps=n_latent)
+        # Per-role activation buffer
+        role_buf = [] if capture_buffer is not None else None
+        kv = latent_steps(model, ids, kv, n_steps=n_latent, capture_buffer=role_buf)
+        if capture_buffer is not None:
+            capture_buffer[role] = role_buf
 
         # Adaptive compression: only compress if prompt is long enough
         if adaptive_compress and prompt_len > 200:
@@ -645,6 +664,8 @@ def main():
     p.add_argument("--no_compress", action="store_true", help="Disable adaptive KV compression in latent_mas")
     p.add_argument("--save_outputs", type=str, default=None, help="If set, write per-sample (question, gold, raw_response, pred, ok) as JSONL to this path")
     p.add_argument("--resume", action="store_true", help="If --save_outputs exists, skip already-processed indices and append new results")
+    p.add_argument("--capture_activations", type=str, default=None,
+                   help="If set, save per-sample latent-step activations as .npz files to this DIRECTORY (MILESTONE-12)")
     args = p.parse_args()
 
     # Resume support: if file exists and --resume, read existing indices + stats.
@@ -696,6 +717,12 @@ def main():
     else:
         out_file = None
 
+    # Set up activation capture directory if requested
+    if args.capture_activations:
+        import os
+        os.makedirs(args.capture_activations, exist_ok=True)
+        print(f"[capture] Will save per-sample activations to {args.capture_activations}")
+
     print(f"Loading {args.model}...")
     model, tokenizer = mlx_lm.load(args.model)
 
@@ -712,12 +739,15 @@ def main():
                 continue
             t0 = time.time()
 
+            # Per-sample capture buffer (only used for latent_mas method)
+            capture_buf = {} if (args.capture_activations and args.method == "latent_mas") else None
+
             if args.method == "baseline":
                 resp, _ = run_baseline(model, tokenizer, item["question"], args.task, args.max_tokens)
             elif args.method == "text_mas":
                 resp, _ = run_text_mas(model, tokenizer, item["question"], args.task, args.max_tokens)
             elif args.method == "latent_mas":
-                resp, _ = run_latent_mas(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, adaptive_compress=not args.no_compress)
+                resp, _ = run_latent_mas(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, adaptive_compress=not args.no_compress, capture_buffer=capture_buf)
             elif args.method == "latent_mas_obf":
                 resp, _ = run_latent_mas_obf(model, tokenizer, item["question"], args.task, args.max_tokens, args.latent_steps, keep_k=32)
 
@@ -745,6 +775,18 @@ def main():
                     "elapsed_sec": round(elapsed, 2),
                     "out_tokens": out_tokens,
                 }, ensure_ascii=False) + "\n")
+
+            # Save per-sample activations as .npz (MILESTONE-12)
+            if capture_buf is not None and len(capture_buf) > 0:
+                import numpy as np
+                np.savez(
+                    f"{args.capture_activations}/sample_{i:05d}.npz",
+                    planner=np.array(capture_buf.get("planner", [])),
+                    critic=np.array(capture_buf.get("critic", [])),
+                    refiner=np.array(capture_buf.get("refiner", [])),
+                    index=i,
+                    correct=bool(ok),
+                )
                 out_file.flush()
     finally:
         if out_file is not None:
