@@ -112,6 +112,79 @@ def generate_with_grafted_activation(
     return tokenizer.decode(tokens)
 
 
+def generate_with_externally_grafted_activation(
+    model, tokenizer, input_ids, graft_layer, grafted_activation,
+    max_tokens=2048, temp=0.6,
+):
+    """
+    Cross-model variant: takes a pre-computed grafted_activation (typically
+    from Model A via get_activation_at_layer) and injects it into THIS model
+    (Model B) at graft_layer's last-token position.
+
+    grafted_activation: 1-D array of shape (hidden_size,) matching this
+    model's hidden_size. For cross-arch grafts where hidden sizes differ,
+    pass an externally-projected activation (projection not handled here).
+    """
+    inner = model.model if hasattr(model, 'model') else model.language_model.model
+    n_layers = len(inner.layers)
+
+    # Run forward with injection
+    h = inner.embed_tokens(input_ids[None])
+    target_d = h.shape[-1]
+    if grafted_activation.shape[-1] != target_d:
+        raise ValueError(
+            f"Grafted activation dim {grafted_activation.shape[-1]} != "
+            f"target model hidden dim {target_d}. Cross-arch with different "
+            f"hidden sizes requires an external projection adapter."
+        )
+    if not (0 <= graft_layer < n_layers):
+        raise ValueError(
+            f"graft_layer={graft_layer} out of range for model with {n_layers} layers"
+        )
+
+    kv_cache = mlx_cache.make_prompt_cache(model)
+    mask = create_attention_mask(h, kv_cache[0])
+
+    for i, (layer, c) in enumerate(zip(inner.layers, kv_cache)):
+        h = layer(h, mask, c)
+        if i == graft_layer:
+            h = mx.concatenate(
+                [h[:, :-1, :], grafted_activation.reshape(1, 1, -1).astype(h.dtype)],
+                axis=1,
+            )
+
+    mx.eval([c.state for c in kv_cache if hasattr(c, 'state')])
+
+    # Generate first token from modified state
+    h_norm = inner.norm(h)
+    if hasattr(model, 'args') and getattr(model.args, 'tie_word_embeddings', False):
+        logits = inner.embed_tokens.as_linear(h_norm)
+    else:
+        logits = model.lm_head(h_norm) if hasattr(model, 'lm_head') else inner.embed_tokens.as_linear(h_norm)
+
+    logits = logits[0, -1]
+    first_token = mx.random.categorical(logits * (1.0 / temp))
+
+    tokens = [first_token.item() if hasattr(first_token, 'item') else int(first_token)]
+    eos_ids = getattr(tokenizer, 'eos_token_ids', None) or [tokenizer.eos_token_id]
+
+    if tokens[0] in eos_ids:
+        return tokenizer.decode([])
+
+    for tok_val, _ in generate_step(
+        mx.array([tokens[-1]]), model,
+        max_tokens=max_tokens - 1,
+        prompt_cache=kv_cache,
+        sampler=lambda x: mx.random.categorical(x * (1.0 / temp)),
+    ):
+        t = tok_val.item() if hasattr(tok_val, 'item') else int(tok_val)
+        if t in eos_ids:
+            break
+        tokens.append(t)
+
+    return tokenizer.decode(tokens)
+
+
 def simple_generate(model, tokenizer, input_ids, max_tokens=2048, temp=0.6):
     """Standard generation without grafting."""
     tokens = []
@@ -188,23 +261,54 @@ def main():
     p.add_argument("--task", choices=["gsm8k", "arc_challenge"], default="gsm8k")
     p.add_argument("--max_samples", type=int, default=30)
     p.add_argument("--max_tokens", type=int, default=2048)
-    p.add_argument("--graft_layer", type=int, default=26, help="Layer at which to graft (paper default)")
+    p.add_argument("--graft_layer", type=int, default=26, help="Layer at which to graft (same-model)")
+    p.add_argument("--graft_layer_a", type=int, default=None,
+                   help="Layer in Model A to capture activation (cross-model). Defaults to --graft_layer")
+    p.add_argument("--graft_layer_b", type=int, default=None,
+                   help="Layer in Model B to inject activation (cross-model). Defaults to --graft_layer")
     p.add_argument("--temp", type=float, default=0.6)
     args = p.parse_args()
 
     print(f"Loading Model A: {args.model_a}...")
     model_a, tok_a = mlx_lm.load(args.model_a)
-    if args.model_a == args.model_b:
+    is_cross_model = args.model_a != args.model_b
+    if not is_cross_model:
         model_b, tok_b = model_a, tok_a
         print("Model A = Model B (same-model activation communication)")
     else:
         print(f"Loading Model B: {args.model_b}...")
         model_b, tok_b = mlx_lm.load(args.model_b)
 
+    # Hidden-size sanity check for cross-model graft
+    inner_a = model_a.model if hasattr(model_a, 'model') else model_a.language_model.model
+    inner_b = model_b.model if hasattr(model_b, 'model') else model_b.language_model.model
+    h_test_a = inner_a.embed_tokens(mx.array([[0]]))
+    h_test_b = inner_b.embed_tokens(mx.array([[0]]))
+    hidden_a = h_test_a.shape[-1]
+    hidden_b = h_test_b.shape[-1]
+    n_layers_a = len(inner_a.layers)
+    n_layers_b = len(inner_b.layers)
+    print(f"Model A: hidden={hidden_a}, n_layers={n_layers_a}")
+    print(f"Model B: hidden={hidden_b}, n_layers={n_layers_b}")
+
+    graft_layer_a = args.graft_layer_a if args.graft_layer_a is not None else args.graft_layer
+    graft_layer_b = args.graft_layer_b if args.graft_layer_b is not None else args.graft_layer
+
+    # Decide which methods to run
+    methods = ["model_a_only", "model_b_only"]
+    if is_cross_model and hidden_a == hidden_b:
+        methods.append("cross_model_graft")
+        print(f"Will run cross_model_graft: A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
+    elif is_cross_model:
+        print(f"⚠ Skipping cross_model_graft: hidden sizes differ ({hidden_a} vs {hidden_b})")
+        print("  Need an external projection adapter for cross-arch graft.")
+    else:
+        methods.append("activation_graft")
+        print(f"Will run same-model activation_graft at layer {args.graft_layer}")
+
     data = load_data(args.task, args.max_samples)
 
-    # Run three methods: Model A alone, Model B alone, A→B activation graft
-    for method in ["model_a_only", "model_b_only", "activation_graft"]:
+    for method in methods:
         correct = 0
         total_time = 0
 
@@ -217,11 +321,20 @@ def main():
             elif method == "model_b_only":
                 ids = build_prompt(tok_b, item["question"], args.task)
                 resp = simple_generate(model_b, tok_b, ids, args.max_tokens, args.temp)
-            else:
-                # Activation graft: A's activation injected into B at graft_layer
+            elif method == "activation_graft":
+                # Same-model graft (A=B): self-graft on B
                 ids_b = build_prompt(tok_b, item["question"], args.task)
                 resp = generate_with_grafted_activation(
                     model_b, tok_b, ids_b, args.graft_layer,
+                    args.max_tokens, args.temp,
+                )
+            elif method == "cross_model_graft":
+                # True cross-model graft: capture from A, inject into B
+                ids_a = build_prompt(tok_a, item["question"], args.task)
+                ids_b = build_prompt(tok_b, item["question"], args.task)
+                grafted = get_activation_at_layer(model_a, ids_a, graft_layer_a)
+                resp = generate_with_externally_grafted_activation(
+                    model_b, tok_b, ids_b, graft_layer_b, grafted,
                     args.max_tokens, args.temp,
                 )
 
