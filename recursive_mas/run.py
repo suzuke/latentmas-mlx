@@ -194,8 +194,24 @@ def _get_inner(model):
 
 
 def _forward_get_raw_hidden(model, input_embeds):
-    """Run model forward and return raw hidden state (before final norm).
-    Computes in float32 for numerical accuracy matching PyTorch."""
+    """Run model forward and return POST-norm hidden state.
+
+    Matches the original PyTorch RecursiveMAS (inference_mas.py:868-869):
+        outputs = model(..., output_hidden_states=True, ...)
+        last_hidden = outputs.hidden_states[-1][:, -1, :]
+
+    In modern HuggingFace transformers (Qwen2/Qwen3/LLaMA), the LAST
+    entry of `outputs.hidden_states` is appended AFTER `self.norm` —
+    i.e. it is POST-final-norm. The InnerLink adapter is trained on
+    these POST-norm features.
+
+    Previous version of this function omitted `inner.norm` and returned
+    PRE-norm, causing a distribution shift at the adapter's input that
+    compounds across the ~40 latent_steps iterations.
+    See audit-results/MILESTONE-5-recursivemas-norm.md.
+
+    Computes in float32 for numerical accuracy.
+    """
     inner = _get_inner(model)
     h = input_embeds.astype(mx.float32)
     cache = [None] * len(inner.layers)
@@ -218,12 +234,15 @@ def _forward_get_raw_hidden(model, input_embeds):
         h = layer(h, mask, c)
         h = h.astype(mx.float32)  # keep float32 between layers
 
+    # Apply final norm to match HF's hidden_states[-1] convention.
+    h = inner.norm(h).astype(mx.float32)
     return h
 
 
 def latent_rollout(model, inner_adapter, input_embeds, n_steps):
     """Autoregressive latent rollout with InnerLink.
-    Collects raw hidden states (pre-norm), matching HuggingFace hidden_states[-1].
+    Collects POST-norm hidden states, matching HuggingFace
+    `outputs.hidden_states[-1]` (post-final-norm).
     """
     hidden_states = []
 
@@ -495,6 +514,7 @@ def load_data(task, n):
 # ── Main ─────────────────────────────────────────────────
 
 def main():
+    import subprocess, datetime
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="gsm8k")
     p.add_argument("--style", default="light", choices=["light", "scaled"])
@@ -503,30 +523,62 @@ def main():
     p.add_argument("--latent_steps", type=int, default=48)
     p.add_argument("--temp", type=float, default=0.6)
     p.add_argument("--rounds", type=int, default=1, help="Number of recursive rounds")
+    p.add_argument("--save_outputs", type=str, default=None,
+                   help="If set, write per-sample JSONL (question, gold, response, pred, ok) to this path")
     args = p.parse_args()
+
+    out_file = open(args.save_outputs, "w") if args.save_outputs else None
+    if out_file is not None:
+        try:
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            git_commit = "unknown"
+        out_file.write(json.dumps({
+            "_meta": True, "method": "recursive_mas",
+            "task": args.task, "style": args.style,
+            "max_samples": args.max_samples, "max_tokens": args.max_tokens,
+            "latent_steps": args.latent_steps, "temp": args.temp,
+            "rounds": args.rounds, "git_commit": git_commit,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }, ensure_ascii=False) + "\n")
+        out_file.flush()
 
     agents, outers = load_system(task="math", style=args.style)
     data = load_data(args.task, args.max_samples)
 
-    print(f"\nRunning RecursiveMAS Sequential-Light on {args.task} ({len(data)} samples)...")
+    print(f"\nRunning RecursiveMAS Sequential-{args.style.capitalize()} on {args.task} ({len(data)} samples)...")
     correct = 0
     total_time = 0
 
-    for i, item in enumerate(data):
-        t0 = time.time()
-        resp = run_pipeline(agents, outers, item["question"], args.task, args.latent_steps, args.max_tokens, args.temp, num_rounds=args.rounds)
-        elapsed = time.time() - t0
-        total_time += elapsed
+    try:
+        for i, item in enumerate(data):
+            t0 = time.time()
+            resp = run_pipeline(agents, outers, item["question"], args.task, args.latent_steps, args.max_tokens, args.temp, num_rounds=args.rounds)
+            elapsed = time.time() - t0
+            total_time += elapsed
 
-        pred = extract_answer(resp, args.task)
-        gold = item["gold"]
-        ok = compare_answer(pred, gold, args.task)
-        correct += ok
-        print(f"  [{i+1}/{len(data)}] {'✓' if ok else '✗'} pred={pred} gold={gold} time={elapsed:.1f}s")
+            pred = extract_answer(resp, args.task)
+            gold = item["gold"]
+            ok = compare_answer(pred, gold, args.task)
+            correct += ok
+            print(f"  [{i+1}/{len(data)}] {'✓' if ok else '✗'} pred={pred} gold={gold} time={elapsed:.1f}s")
+
+            if out_file is not None:
+                out_file.write(json.dumps({
+                    "index": i, "question": item["question"], "gold": gold,
+                    "raw_response": resp, "extracted_pred": pred,
+                    "correct": bool(ok), "elapsed_sec": round(elapsed, 2),
+                }, ensure_ascii=False) + "\n")
+                out_file.flush()
+    finally:
+        if out_file is not None:
+            out_file.close()
 
     acc = correct / len(data)
     print(json.dumps({
-        "method": "recursive_mas_light",
+        "method": f"recursive_mas_{args.style}",
         "task": args.task,
         "samples": len(data),
         "accuracy": round(acc, 4),
