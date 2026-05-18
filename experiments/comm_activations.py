@@ -20,6 +20,61 @@ from datasets import load_dataset
 
 SYSTEM = "You are a helpful assistant."
 
+# ── Cross-LoRA-style SVD subspace alignment ──────────────
+
+def compute_svd_alignment_matrix(model_a, model_b, n_sample=8192, rank=None):
+    """Compute T (d_a × d_b) such that h_a @ T approximately maps Model A's
+    activation space onto Model B's, via Cross-LoRA-style SVD subspace
+    alignment of the embedding matrices.
+
+    For row-vector convention:
+        h_b ≈ h_a @ T
+    where T = V_a @ V_b^T, V_a/V_b are right singular vectors of E_a/E_b.
+
+    Assumption: top-k PCs of two LLMs' embedding spaces encode similar
+    concepts in rank order. This is the simplest possible alignment with
+    NO training data; it may not always hold.
+
+    Args:
+        model_a, model_b: MLX models with .model.embed_tokens or
+            .language_model.model.embed_tokens
+        n_sample: number of vocab rows to sample (use min over both vocabs)
+        rank: truncation rank; None = full hidden_size
+
+    Returns:
+        T: mx.array of shape [d_a, d_b], float32
+    """
+    inner_a = model_a.model if hasattr(model_a, 'model') else model_a.language_model.model
+    inner_b = model_b.model if hasattr(model_b, 'model') else model_b.language_model.model
+    embed_a = inner_a.embed_tokens
+    embed_b = inner_b.embed_tokens
+
+    # Sample-based to handle quantized embeddings cleanly
+    vocab_a, vocab_b = embed_a.weight.shape[0], embed_b.weight.shape[0]
+    n = min(n_sample, vocab_a, vocab_b)
+    ids = mx.arange(n)
+    E_a = embed_a(ids).astype(mx.float32)   # [n, d_a]
+    E_b = embed_b(ids).astype(mx.float32)   # [n, d_b]
+
+    # SVD on CPU stream (large matrices, deterministic)
+    _, _, Vh_a = mx.linalg.svd(E_a, stream=mx.cpu)   # Vh_a is [d_a, d_a]
+    _, _, Vh_b = mx.linalg.svd(E_b, stream=mx.cpu)   # Vh_b is [d_b, d_b]
+    mx.eval(Vh_a, Vh_b)
+
+    d_a, d_b = Vh_a.shape[0], Vh_b.shape[0]
+    if rank is None:
+        rank = min(d_a, d_b)
+    # Truncate to rank
+    Vh_a_top = Vh_a[:rank, :]   # [rank, d_a]
+    Vh_b_top = Vh_b[:rank, :]   # [rank, d_b]
+
+    # Row-vector form: h_b = h_a @ (Vh_a^T @ Vh_b)
+    # i.e. T = Vh_a_top^T @ Vh_b_top, shape [d_a, d_b]
+    T = mx.matmul(mx.transpose(Vh_a_top), Vh_b_top)
+    mx.eval(T)
+    return T
+
+
 # ── Activation grafting core ─────────────────────────────
 
 def get_activation_at_layer(model, input_ids, layer_idx):
@@ -266,6 +321,10 @@ def main():
                    help="Layer in Model A to capture activation (cross-model). Defaults to --graft_layer")
     p.add_argument("--graft_layer_b", type=int, default=None,
                    help="Layer in Model B to inject activation (cross-model). Defaults to --graft_layer")
+    p.add_argument("--align", choices=["none", "svd"], default="none",
+                   help="Cross-model alignment method (only used when models differ)")
+    p.add_argument("--svd_rank", type=int, default=None,
+                   help="Truncation rank for SVD alignment (default: full hidden_size)")
     p.add_argument("--temp", type=float, default=0.6)
     args = p.parse_args()
 
@@ -294,11 +353,19 @@ def main():
     graft_layer_a = args.graft_layer_a if args.graft_layer_a is not None else args.graft_layer
     graft_layer_b = args.graft_layer_b if args.graft_layer_b is not None else args.graft_layer
 
+    # Compute cross-model alignment matrix if requested
+    align_matrix = None
+    if is_cross_model and args.align == "svd":
+        print(f"Computing SVD alignment matrix (rank={args.svd_rank or 'full'})...")
+        align_matrix = compute_svd_alignment_matrix(model_a, model_b, rank=args.svd_rank)
+        print(f"  Alignment T shape: {align_matrix.shape}")
+
     # Decide which methods to run
     methods = ["model_a_only", "model_b_only"]
     if is_cross_model and hidden_a == hidden_b:
         methods.append("cross_model_graft")
-        print(f"Will run cross_model_graft: A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
+        method_suffix = f" (align={args.align})" if args.align != "none" else ""
+        print(f"Will run cross_model_graft{method_suffix}: A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
     elif is_cross_model:
         print(f"⚠ Skipping cross_model_graft: hidden sizes differ ({hidden_a} vs {hidden_b})")
         print("  Need an external projection adapter for cross-arch graft.")
@@ -329,10 +396,13 @@ def main():
                     args.max_tokens, args.temp,
                 )
             elif method == "cross_model_graft":
-                # True cross-model graft: capture from A, inject into B
+                # True cross-model graft: capture from A, optionally align, inject into B
                 ids_a = build_prompt(tok_a, item["question"], args.task)
                 ids_b = build_prompt(tok_b, item["question"], args.task)
                 grafted = get_activation_at_layer(model_a, ids_a, graft_layer_a)
+                if align_matrix is not None:
+                    # Apply T: h_b = h_a @ T  (row-vector convention)
+                    grafted = mx.matmul(grafted.astype(mx.float32), align_matrix).astype(grafted.dtype)
                 resp = generate_with_externally_grafted_activation(
                     model_b, tok_b, ids_b, graft_layer_b, grafted,
                     args.max_tokens, args.temp,
