@@ -362,13 +362,20 @@ def main():
 
     # Decide which methods to run
     methods = ["model_a_only", "model_b_only"]
-    if is_cross_model and hidden_a == hidden_b:
-        methods.append("cross_model_graft")
-        method_suffix = f" (align={args.align})" if args.align != "none" else ""
-        print(f"Will run cross_model_graft{method_suffix}: A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
-    elif is_cross_model:
-        print(f"⚠ Skipping cross_model_graft: hidden sizes differ ({hidden_a} vs {hidden_b})")
-        print("  Need an external projection adapter for cross-arch graft.")
+    if is_cross_model:
+        # Cross-model graft path:
+        # - same hidden size → graft works with or without alignment
+        # - different hidden size → SVD alignment provides the projection
+        if hidden_a == hidden_b:
+            methods.append("cross_model_graft")
+            method_suffix = f" (align={args.align})" if args.align != "none" else ""
+            print(f"Will run cross_model_graft{method_suffix}: A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
+        elif args.align == "svd":
+            methods.append("cross_model_graft")
+            print(f"Will run cross_model_graft (align=svd, cross-arch {hidden_a}->{hidden_b}): A.layer[{graft_layer_a}] -> B.layer[{graft_layer_b}]")
+        else:
+            print(f"⚠ Skipping cross_model_graft: hidden sizes differ ({hidden_a} vs {hidden_b}) and --align=none")
+            print("  Use --align svd to enable cross-arch projection.")
     else:
         methods.append("activation_graft")
         print(f"Will run same-model activation_graft at layer {args.graft_layer}")
