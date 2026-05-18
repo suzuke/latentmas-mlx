@@ -122,20 +122,35 @@ Qwen3-4B-4bit. The fix uses `embed_tokens(all_ids)` which dequantizes
 correctly for both quantized and non-quantized embeddings (verified
 target_norm = 1.0985 on 4-bit vs 1.0974 on bf16, ratio 1.001).
 
-### Verification — 50-sample GSM8K Qwen3-4B bf16, max_tokens=2048
+### Verification — Full 1319-sample GSM8K Qwen3-4B bf16, max_tokens=2048
 
-| Method | Acc | Mode Collapse | Trunc | Avg Tokens |
-|--------|-----|--------------|-------|-----------|
-| Baseline | 92.0% | 0 | 4 | 989.8 |
-| LatentMAS (current) | 84.0% | **3** | 0 | 587.7 |
-| LatentMAS (no compress) | 88.0% | **3** | 0 | 561.8 |
-| **LatentMAS (fixed)** | **94.0%** | **0** | 1 | 529.4 |
+| Method | Acc | Mode Collapse | Reasoning errors | Truncation |
+|--------|-----|--------------|------------------|-----------|
+| LatentMAS (current/broken) | 92.2%* | ~6% (50-sample rate) | — | — |
+| **LatentMAS (fixed)** | **90.3%** | **0.23% (3/1319)** | 6.7% (89/1319) | 2.7% (36/1319) |
 
-- Mode collapse rate: 3/50 → **0/50** (eliminated)
-- Accuracy: 84% → **94%** (+10pp on this setting)
-- The 3 previously-collapsed samples (idx 11, 20, 40) all recover to
-  normal reasoning with correct answers
-- LatentMAS now finally beats baseline on GSM8K (was -8pp, now +2pp)
+\* From RESULTS.md, same MLX bf16 setup.
+
+**The fix is a reliability improvement, not a pure accuracy improvement.**
+
+- **Mode collapse: 6% → 0.23%** (~25× reduction) — the core win.
+  Catastrophic failures (whitespace floods, `"3 3 3..."` loops,
+  `"DocumentDocument..."` loops) virtually eliminated.
+- **Accuracy: 92.2% → 90.3%** (small regression at scale, within
+  sampling noise).
+- The norm rescaling bounds the latent state magnitude → removes
+  catastrophic outliers but also slightly constrains exploration
+  that occasionally finds correct answers. This matches recent
+  theory: ["Latent CoT's continuous representation enables robust
+  exploration but is also the direct cause of its failure on
+  computational tasks by amplifying noise."](https://openreview.net/forum?id=q7Nhu2Fw11)
+
+### Historical note: 50-sample run earlier suggested +10pp
+
+An earlier 50-sample run showed 84% (broken) → 94% (fixed), +10pp.
+That gap was within the sampling noise of a 6% catastrophic-failure
+rate (small n × rare event). The 1319-sample run gives the truer
+picture. Both 50-sample and 1319-sample data are committed.
 
 ### Scope caveat
 

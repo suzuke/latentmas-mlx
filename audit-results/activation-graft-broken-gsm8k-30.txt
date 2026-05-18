@@ -1,0 +1,27 @@
+Run: experiments/comm_activations.py BROKEN (mask=None for prefill)
+Model: mlx-community/Qwen3-8B-4bit (same for A and B)
+Task: GSM8K 30 samples, max_tokens=2048, temp=0.6, graft_layer=26
+Date: 2026-05-18
+
+Results:
+  model_a_only:     83.33% (25/30), avg 34.55s/sample
+  model_b_only:     86.67% (26/30), avg 36.18s/sample
+  activation_graft: 60.00% (18/30), avg 41.92s/sample  <-- BROKEN
+
+Regression vs single model: -25pp (~average of model_a + model_b is 85%)
+
+Source raw output:
+{"method": "model_a_only",     "samples": 30, "accuracy": 0.8333, "correct": 25, "avg_time_sec": 34.55, "total_time_sec": 1036.65}
+{"method": "model_b_only",     "samples": 30, "accuracy": 0.8667, "correct": 26, "avg_time_sec": 36.18, "total_time_sec": 1085.42}
+{"method": "activation_graft", "samples": 30, "accuracy": 0.6000, "correct": 18, "avg_time_sec": 41.92, "total_time_sec": 1257.53}
+
+Compare with RESULTS.md report:
+  RESULTS.md "Single model": 90.0%
+  RESULTS.md "Activation graft": 47.0% (-43pp)
+
+My broken numbers differ in magnitude but show same pattern:
+graft causes a significant regression vs single model.
+Sample variance (temp=0.6) + n=30 explains the magnitude difference.
+
+What matters: the regression exists. Now testing if the fix
+(add causal mask to manual prefill) eliminates it.

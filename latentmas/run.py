@@ -644,30 +644,57 @@ def main():
     p.add_argument("--temp", type=float, default=0.6)
     p.add_argument("--no_compress", action="store_true", help="Disable adaptive KV compression in latent_mas")
     p.add_argument("--save_outputs", type=str, default=None, help="If set, write per-sample (question, gold, raw_response, pred, ok) as JSONL to this path")
+    p.add_argument("--resume", action="store_true", help="If --save_outputs exists, skip already-processed indices and append new results")
     args = p.parse_args()
 
-    out_file = open(args.save_outputs, "w") if args.save_outputs else None
-    if out_file is not None:
-        try:
-            git_commit = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
-            ).strip()
-        except Exception:
-            git_commit = "unknown"
-        out_file.write(json.dumps({
-            "_meta": True,
-            "method": args.method,
-            "model": args.model,
-            "task": args.task,
-            "max_samples": args.max_samples,
-            "max_tokens": args.max_tokens,
-            "latent_steps": args.latent_steps,
-            "temp": args.temp,
-            "no_compress": args.no_compress,
-            "git_commit": git_commit,
-            "timestamp": datetime.datetime.now().isoformat(),
-        }, ensure_ascii=False) + "\n")
-        out_file.flush()
+    # Resume support: if file exists and --resume, read existing indices + stats.
+    done_indices: set[int] = set()
+    resume_correct = 0
+    resume_time = 0.0
+    resume_tokens = 0
+    if args.save_outputs and args.resume:
+        import os
+        if os.path.exists(args.save_outputs):
+            with open(args.save_outputs) as f:
+                for line in f:
+                    d = json.loads(line)
+                    if "_meta" in d:
+                        continue
+                    if "index" in d:
+                        done_indices.add(d["index"])
+                        if d.get("correct"):
+                            resume_correct += 1
+                        resume_time += d.get("elapsed_sec", 0)
+                        resume_tokens += d.get("out_tokens", 0)
+            print(f"[resume] Found {len(done_indices)} completed samples ({resume_correct} correct) in {args.save_outputs}")
+
+    # Open file: append if resuming with existing data, otherwise write fresh
+    if args.save_outputs:
+        mode = "a" if done_indices else "w"
+        out_file = open(args.save_outputs, mode)
+        if mode == "w":
+            try:
+                git_commit = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+                ).strip()
+            except Exception:
+                git_commit = "unknown"
+            out_file.write(json.dumps({
+                "_meta": True,
+                "method": args.method,
+                "model": args.model,
+                "task": args.task,
+                "max_samples": args.max_samples,
+                "max_tokens": args.max_tokens,
+                "latent_steps": args.latent_steps,
+                "temp": args.temp,
+                "no_compress": args.no_compress,
+                "git_commit": git_commit,
+                "timestamp": datetime.datetime.now().isoformat(),
+            }, ensure_ascii=False) + "\n")
+            out_file.flush()
+    else:
+        out_file = None
 
     print(f"Loading {args.model}...")
     model, tokenizer = mlx_lm.load(args.model)
@@ -675,12 +702,14 @@ def main():
     data = load_data(args.task, args.max_samples)
     print(f"Running {args.method} on {args.task} ({len(data)} samples)...")
 
-    correct = 0
-    total_time = 0
-    total_out_tokens = 0
+    correct = resume_correct
+    total_time = resume_time
+    total_out_tokens = resume_tokens
 
     try:
         for i, item in enumerate(data):
+            if i in done_indices:
+                continue
             t0 = time.time()
 
             if args.method == "baseline":
