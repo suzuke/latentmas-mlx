@@ -1,8 +1,11 @@
 # Final Audit Report — latentmas-mlx
 
 **Audited**: `suzuke/latentmas-mlx` @ commit `2e7faa7`
-**Audit window**: 2026-05-16 to 2026-05-18 (3 sessions)
-**Latest branch**: `audit/fix-recursivemas-norm` (includes all 3 fixes)
+**Audit window**: 2026-05-16 to 2026-05-18 (3+ sessions)
+**Latest branches**:
+- `audit/fix-recursivemas-norm` — all 3 bug fixes + this report
+- `audit/feature-cross-model-graft` — cross-model graft implementation + ablations (MILESTONES 8-11)
+
 **Supersedes**: `AUDIT-REPORT.md` (earlier draft, used 50-sample numbers)
 
 ---
@@ -26,6 +29,20 @@ was originally claimed as "+10pp accuracy". At full 1319-sample scale,
 the gap inverts slightly (-1.9pp) but **mode collapse rate drops 25×**.
 Re-frame the fix as **reliability improvement** (eliminates ~95% of
 catastrophic failures), not as **average-accuracy improvement**.
+
+**Cross-model graft stretch goal** (`audit/feature-cross-model-graft` branch):
+
+| Question | Answer |
+|----------|--------|
+| Does PR #2 fix unblock cross-model graft testing? | ✅ Yes |
+| Does cross-arch zero-shot transfer work? | ❌ No (Qwen3 → LLaMA-1B: 10% vs 20% baseline) |
+| Does naive SVD subspace alignment help cross-arch? | ❌ No (still 10%) |
+| Does same-family cross-size graft via SVD alignment work? | ⚠ **Inconclusive** — random orthogonal T gives identical accuracy (90%), so the apparent gain is **receiver-model absorption** (Qwen3-4B ignores late-layer injection), NOT alignment work |
+
+Took two honest course-corrections in this audit: MILESTONE-6 walked
+back "+10pp" framing; MILESTONE-11 walked back "SVD alignment works
+for same-family" framing. Both corrections triggered by running proper
+controls late.
 
 ---
 
@@ -195,6 +212,80 @@ To resolve, need n≥100 at temp=0 (deterministic).
 
 ---
 
+## Cross-model graft stretch goal (MILESTONES 8–11)
+
+After fixing Bug #2 (causal mask), the cross-model activation graft
+framework became functional. We pushed further to ask: **can latent
+activations be transferred between different LLMs zero-shot?**
+
+### Implementation
+
+The original `experiments/comm_activations.py` only supported
+**same-model graft** despite docstrings suggesting otherwise. We
+added true cross-model support (`generate_with_externally_grafted_activation`)
+that accepts a pre-computed activation captured from Model A and
+injects it into Model B at a separate graft layer. New args
+`--graft_layer_a/_b` and `--align {none,svd,random}`.
+
+### Results
+
+```
+n=30 GSM8K, temp=0.6
+```
+
+| Setup | Strong baseline | Graft accuracy | Reading |
+|-------|----------------|----------------|---------|
+| Same-model (Qwen3-8B → 8B, fixed) | 85% | 83% | No-op as math predicts |
+| Cross-arch no-align (Qwen3-1.7B → LLaMA-1B) | 20% | **10%** | Catastrophic; receiver too weak to absorb noise |
+| Cross-arch SVD-align (Qwen3-1.7B → LLaMA-1B) | 20% | **10%** | SVD doesn't help |
+| Same-family SVD-align (Qwen3-1.7B → Qwen3-4B) | 87% | **90%** | Looks like it works... |
+| **Same-family RANDOM T (control, Qwen3-1.7B → Qwen3-4B)** | 90% | **90%** | **... but random rotation is identical → SVD did nothing** |
+
+### Honest interpretation
+
+**The "same-family alignment works" reading from MILESTONE-10 was wrong.**
+The random-T ablation (MILESTONE-11) shows the apparent 90% comes from
+the **receiver model (Qwen3-4B) absorbing any reasonable late-layer
+injection** via its remaining 6 layers + attention recovery, not from
+alignment doing useful translation work.
+
+The cleanest story across all 5 conditions: **graft accuracy ≈ receiver-
+model-alone accuracy when receiver is strong enough to recover;
+catastrophic degradation when receiver is weak**. Alignment quality
+is not the primary variable in our setup.
+
+### What the cross-model work nonetheless contributed
+
+1. ✅ **Validated PR #2 fix in practice**: the framework went from
+   crashing/corrupting to producing clean comparable numbers.
+2. ✅ **First quantitative measurement of cross-arch zero-shot
+   alignment failure**: Qwen3 → LLaMA drops -10pp below LLaMA-only
+   baseline; consistent with Direct Semantic Communication paper's
+   finding that trained translators are needed.
+3. ✅ **Implemented true cross-model graft** (separate `--align`
+   options, `--graft_layer_a/_b` for proportional depth, etc.) —
+   the framework is now ready for any future alignment research.
+4. ⚠ **Showed naive SVD alignment is insufficient** (no help on
+   cross-arch; ablation shows no genuine effect on same-family either).
+
+### What we did NOT prove
+
+- That **any** alignment scheme works zero-shot. The audit didn't
+  test trained translators, Procrustes with anchor tokens, or
+  Cross-LoRA's actual Frobenius-optimal projection (which differs
+  from our naive PC-by-index version).
+- That late-layer absorption is **complete**. We didn't run
+  zero-injection ablation to test whether the graft mechanism has
+  any effect at all on receiver output.
+- That same-family alignment is **fundamentally broken**. A
+  sensitive-setup test (early-layer graft + random T ablation) would
+  be the next experiment.
+
+These remain open for future research. The audit's main goals (3 bugs
+identified + fixed + scale-validated) are intact.
+
+---
+
 ## The pattern across all three bugs
 
 | Bug | Standardization step omitted |
@@ -236,6 +327,8 @@ The audit was scoped to identifiable correctness issues. Out of scope:
 
 ## Files in this audit
 
+On `audit/fix-recursivemas-norm` branch:
+
 ```
 latentmas-mlx-audit/
 ├── FINAL-REPORT.md                            ← this file (latest)
@@ -250,11 +343,25 @@ latentmas-mlx-audit/
     ├── MILESTONE-4-activation-graft.md        ← Bug 2 root cause
     ├── MILESTONE-5-recursivemas-norm.md       ← Bug 3 root cause
     ├── MILESTONE-6-scale-validation.md        ← honest 1319-scale revision
-    ├── UPSTREAM-ISSUE-DRAFT.md                ← upstream issue draft (needs update)
+    ├── MILESTONE-7-graft-fix-verified.md      ← Bug 2 +23pp verification
+    ├── UPSTREAM-ISSUE-DRAFT.md                ← upstream issue draft (updated)
     ├── LATENT-REASONING-SURVEY-2026-05.md     ← theoretical context
     ├── latent_mas-gsm8k-1319-bf16-fixed.jsonl ← full GSM8K data
     ├── recursive_mas-math500-30-light-{broken,fixed}.jsonl
     └── ... (other per-experiment data)
+```
+
+Additional content on `audit/feature-cross-model-graft` branch:
+
+```
+latentmas-mlx-audit/
+├── experiments/comm_activations.py            ← cross-model graft + SVD/random align
+└── audit-results/
+    ├── MILESTONE-8-cross-model-graft.md       ← framework working, 10% baseline
+    ├── MILESTONE-9-svd-alignment-fails.md     ← SVD doesn't help cross-arch
+    ├── MILESTONE-10-same-family-graft-works.md ← initial 90% finding (later revised)
+    ├── MILESTONE-11-random-T-ablation.md      ← random-T = SVD-T → MILESTONE-10 retracted
+    └── cross-model-graft-*.txt                ← per-experiment logs
 ```
 
 ---
@@ -262,25 +369,32 @@ latentmas-mlx-audit/
 ## Branches on GitHub
 
 - `audit/gsm8k-extraction` — diagnosis only, no fixes
-- `audit/fix-norm-rescale` — Bug 1 fix (PR #1)
-- `audit/fix-activation-graft` — Bug 1 + Bug 2 fixes + survey doc + resume capability
-- `audit/fix-recursivemas-norm` — Bug 1 + Bug 2 + Bug 3 fixes + this report
+- `audit/fix-norm-rescale` — Bug 1 fix (PR #1, MERGED)
+- `audit/fix-activation-graft` — Bug 1 + Bug 2 fixes + survey doc + resume capability (PR #2, OPEN)
+- `audit/fix-recursivemas-norm` — Bug 1 + Bug 2 + Bug 3 fixes + this report (PR #3, OPEN)
+- `audit/feature-cross-model-graft` — Cross-model graft implementation + SVD/random alignment + ablation (no PR — research artifact, not bug fix)
 
 ---
 
 ## Recommended actions for the repo owner (suzuke)
 
-1. **Update PR #1 description** with honest 1319-sample numbers
-   (frame as reliability fix, not accuracy fix).
-2. **Decide whether to** merge Bug 2 (Activation Graft) and Bug 3
-   (RecursiveMAS) as separate PRs or combined.
-3. **Update RESULTS.md** with honest comparison once all three fixes
-   are merged.
-4. **Consider running larger validation** (n=100+ at temp=0) on
-   RecursiveMAS to settle the +6.7pp question.
-5. **For future MLX ports of similar code**, consider using
+1. ✅ **Update PR #1 description** with honest 1319-sample numbers
+   (frame as reliability fix, not accuracy fix). DONE during audit.
+2. **Review PR #2** (Activation Graft causal mask) — cleanest of the
+   three fixes, +23pp recovery, recommend merge.
+3. **Review PR #3** (RecursiveMAS post-norm) — +6.7pp within noise
+   at n=30; merge based on confidence in the code-level diagnosis, OR
+   gate on n=100+ rerun at temp=0.
+4. **Update RESULTS.md** with honest comparison once all three fixes
+   are merged. Cite this FINAL-REPORT for the framing.
+5. **`audit/feature-cross-model-graft` branch** is a research artifact
+   (not a bug fix). Decide whether to:
+   - Merge as a new feature ("cross-model graft now actually works")
+   - Keep as a research branch for follow-up experiments
+   - Discard if not pursuing cross-model research further
+6. **For future MLX ports of similar code**, consider using
    `mlx_lm.models.X.Model.__call__` directly instead of manual layer
-   loops where possible.
+   loops where possible — would catch all three bugs of this audit.
 
 ---
 
@@ -288,19 +402,35 @@ latentmas-mlx-audit/
 
 The audit was correctly motivated and correctly identified three bugs.
 But I (the audit author) made the same class of mistake the original
-author made: **reported small-sample numbers that overstated the
-benefit**. The 50-sample "+10pp" framing was within sampling noise of
-a 6% catastrophic-failure rate.
+author made — twice — **reporting small-sample positive results that
+overstated the benefit, without running proper controls**.
 
-The 1319-sample data tells the truer story: **the fix removes
-catastrophic failures at modest accuracy cost**. This is still valuable
-— catastrophic failures in agent systems are worse than marginal
-accuracy losses — but the framing matters.
+| Mistake | When caught | How |
+|---------|------------|-----|
+| 50-sample "+10pp accuracy" framing for Bug #1 fix | MILESTONE-6 | Full 1319-sample run revealed actual gap is -1.9pp |
+| "Same-family SVD alignment works at 90%" claim for cross-model | MILESTONE-11 | Random-orthogonal-T ablation gave identical 90% |
 
-Documenting this honestly is more valuable than spinning the result.
+Both corrections cost a few minutes of additional work but were
+**only run after the positive results were already documented and
+celebrated**. The pattern is: enthusiasm → claim → control later.
+The right pattern is: claim → control before celebrating → revise
+if needed.
+
+The 1319-sample data and the random-T ablation tell the true stories.
+Both are uncomfortable for the original framings but are scientifically
+correct. **Documenting this honestly is more valuable than spinning
+the result**.
+
+The audit still delivers substantial value:
+- 3 real bugs identified by code-level diff
+- 3 small fixes implemented + committed
+- 2 of 3 fixes verified at meaningful scale
+- Cross-model framework unblocked + tested
+- Honest scope on what cross-model alignment can/cannot do zero-shot
 
 ---
 
 *This report supersedes `AUDIT-REPORT.md` for any external citation
-purpose. The earlier report's "+10pp" framing should be considered
+purpose. The earlier report's "+10pp" framing and MILESTONE-10's
+"same-family SVD alignment works" framing should both be considered
 withdrawn.*
