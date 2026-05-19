@@ -100,6 +100,39 @@ For **interpretability researchers**:
 
 ---
 
+## Amendment 1 (2026-05-19) — Mechanism for the regime boundary
+
+The synthesis above leaves open *why* iterated trajectories converge
+on trained-with-feedback models (Coconut) but diverge on
+untrained-on-feedback models (LatentMAS broken).
+
+A sibling audit (`coconut-mlx-audit`) directly tested this with
+matched-class controls. See:
+
+> `/Users/suzuke/research/coconut-mlx-audit/audit-results/MILESTONE-16-training-vs-divergence.md`
+
+Result: on identical model class (GPT-2 small) + identical data
+(ProsQA), Coconut (trained with latent feedback) converges to a stable
+~8× OOD-scale fixed point in 2 iterations (std<2 at n=50); CoT-tuned
+control (same data, no latent feedback objective) **monotonically
+diverges** 61× → 83× over 6 passes. Pass-5 z-score ≈26σ at n=50.
+
+This confirms the mechanism: **training-with-feedback discovers a
+convergent latent fixed point; without that training, iteration
+accumulates divergence**. M-15's iteration-regime claim is not
+withdrawn; it is now mechanistically explained.
+
+Two empirical routes to convergence are now documented:
+- **Trained** (Coconut): fixed point discovered by gradient descent
+  at ~8× OOD scale.
+- **Imposed** (LatentMAS-fixed): fixed point forced by norm rescaling
+  at ~1× embedding scale.
+
+Both work. They differ in where the fixed point lives and how it is
+established.
+
+---
+
 ## What this is NOT
 
 This is **not** a paper-strength theoretical claim. It's a synthesis
