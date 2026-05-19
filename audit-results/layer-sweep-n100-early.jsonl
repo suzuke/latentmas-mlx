@@ -1,0 +1,5 @@
+{"layer_pct": "N/A", "layer_idx": "N/A", "condition": "baseline", "accuracy": 0.46, "correct": 46, "n": 100, "avg_cos_sim": null, "avg_l2_ratio": null}
+{"layer_pct": 0.1, "layer_idx": 3, "condition": "svd", "accuracy": 0.46, "correct": 46, "n": 100, "avg_cos_sim": -0.035309037789702416, "avg_l2_ratio": 10.759094648361206, "std_cos_sim": 0.006697135241383082, "std_l2_ratio": 0.29594180657866287}
+{"layer_pct": 0.1, "layer_idx": 3, "condition": "random", "accuracy": 0.4, "correct": 40, "n": 100, "avg_cos_sim": 0.001260713381707319, "avg_l2_ratio": 10.759064950942992, "std_cos_sim": 0.005874754745900582, "std_l2_ratio": 0.29592124606597364}
+{"layer_pct": 0.25, "layer_idx": 9, "condition": "svd", "accuracy": 0.42, "correct": 42, "n": 100, "avg_cos_sim": -0.05336782205849886, "avg_l2_ratio": 3.9294865107536316, "std_cos_sim": 0.005646489153319426, "std_l2_ratio": 0.10694206849356053}
+{"layer_pct": 0.25, "layer_idx": 9, "condition": "random", "accuracy": 0.45, "correct": 45, "n": 100, "avg_cos_sim": 0.019980801502242684, "avg_l2_ratio": 3.929475021362305, "std_cos_sim": 0.005939741954832107, "std_l2_ratio": 0.10690960175415663}

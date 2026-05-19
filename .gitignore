@@ -5,3 +5,8 @@ __pycache__/
 *.json
 !requirements.txt
 .DS_Store
+
+# Raw activation captures (~180MB, regenerable via experiments/capture_*.py)
+audit-results/activations-broken/
+audit-results/activations-fixed-50/
+audit-results/activations-fixed-3collapse/

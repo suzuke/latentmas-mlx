@@ -39,10 +39,20 @@ catastrophic failures), not as **average-accuracy improvement**.
 | Does naive SVD subspace alignment help cross-arch? | ❌ No (still 10%) |
 | Does same-family cross-size graft via SVD alignment work? | ⚠ **Inconclusive** — random orthogonal T gives identical accuracy (90%), so the apparent gain is **receiver-model absorption** (Qwen3-4B ignores late-layer injection), NOT alignment work |
 
-Took two honest course-corrections in this audit: MILESTONE-6 walked
-back "+10pp" framing; MILESTONE-11 walked back "SVD alignment works
-for same-family" framing. Both corrections triggered by running proper
-controls late.
+Took **four** honest course-corrections in this audit, each killed by
+a control run after the initial claim:
+
+| # | Original claim | Killed by | Final framing |
+|---|----------------|-----------|----------------|
+| 1 | "25× mode collapse reduction" (M-6) | n mismatch (50 vs 1319) | ≤0.23% fixed-only (see CAVEAT-25X-REDUCTION) |
+| 2 | "SVD alignment works for same-family" (M-10) | random-T ablation | receiver absorbs late-layer injection (M-11) |
+| 3 | "||h|| drifts unboundedly" (M-2 original) | n=100 broken-code trajectory capture | constant 150× iterated OOD scale (M-12, M-14a) |
+| 4 | "SVD works at early layers" (M-13 pilot) | n=100 layer sweep | depth-independent absorption (M-14b) |
+
+Pattern: every positive small-n result died when properly controlled.
+Every finding that survived came from running the proper control.
+See `audit-results/MILESTONE-14a-latentmas-collapse-taxonomy.md` and
+`MILESTONE-14b-cross-model-alignment-negative.md` for the latest two.
 
 ---
 
@@ -73,14 +83,29 @@ The MLX port omitted this entirely.
 
 ### Why it matters
 
-Without rescaling, hidden state magnitude drifts unboundedly over 40+
-latent iterations × 3 agents = 120 unrescaled feedbacks. Eventually
-the state lands in OOD territory and the judger produces degenerate
-output:
+**The hidden state fed back as input is roughly 150× larger than the
+embedding rows the model was trained on.** This OOD-scale input is
+applied at every latent iteration (40 steps × 3 agents = 120
+feedbacks). The model is robust to this OOD input ~94% of the time;
+in the remaining ~6% the iterated mismatch compounds into a token-
+level pathology where the judger autoregressive generation locks
+onto an attractor token:
 
 - `<think>` + hundreds of newlines + wrong `\boxed{}` (idx=11, 50-sample run)
 - `"3 3 3 3 ..."` token loop (idx=20)
 - `"DocumentDocument..."` token loop (idx=40)
+
+> **NOTE (postmortem, MILESTONE-12 / 14a)** — the original framing of
+> this section claimed "hidden state magnitude drifts unboundedly."
+> That was wrong. MILESTONE-12 captured ||h|| trajectories across
+> 100 broken-code samples and found ||h|| is **bounded** (149-222,
+> identical shape across all samples including the one confirmed
+> mode-collapse). The mechanism is **constant 150× OOD scale at
+> every iteration**, not magnitude drift. The fix removes the OOD
+> condition; it does not "prevent accumulation" since there is none.
+> PR #1 fix correctness is unchanged; only the explanation is
+> corrected. See `audit-results/MILESTONE-14a-latentmas-collapse-taxonomy.md`
+> for full data.
 
 ### Verification at scale
 
@@ -297,9 +322,51 @@ is not the primary variable in our setup.
 - That late-layer absorption is **complete**. We didn't run
   zero-injection ablation to test whether the graft mechanism has
   any effect at all on receiver output.
-- That same-family alignment is **fundamentally broken**. A
-  sensitive-setup test (early-layer graft + random T ablation) would
-  be the next experiment.
+
+### MILESTONE-13 update — depth-independent absorption confirmed
+
+After this audit's first pass, kiro-research ran the
+**sensitive-setup test** (early-layer graft + random-T ablation,
+n=100, MATH-500 level 3-5, temp=0) that we had flagged as
+"next experiment." Result: depth-independent null.
+
+| Condition | Accuracy | L2_ratio |
+|-----------|----------|----------|
+| Baseline (no graft) | 46% | — |
+| SVD @ 10% depth | 46% | 10.76 |
+| Random T @ 10% depth | 40% | 10.76 |
+| SVD @ 25% depth | 42% | 3.93 |
+| Random T @ 25% depth | 45% | 3.93 |
+
+- Layer 10%: SVD vs random p=0.20 (NS, pre-registered threshold p<0.025)
+- Layer 25%: wrong direction
+- Pilot's n=10 +20pp signal was sampling noise (CI ±30pp predicted this)
+
+**Updated interpretation**: Receiver absorption of orthogonal
+residual perturbation is **depth-independent**, not a late-layer
+property. Even an 11× larger orthogonal injection (L2_ratio 10.76 at
+layer 3) is absorbed by Qwen3-4B with no significant accuracy effect.
+SVD vs random rotation are indistinguishable at all tested depths.
+
+See `audit-results/MILESTONE-14b-cross-model-alignment-negative.md`
+for full data and `audit-results/MILESTONE-13-layer-swap-plan.md`
+for the pre-registered protocol.
+
+### Iteration regime — Bug #1 vs cross-model graft
+
+Two seemingly-related findings turn out to be governed by **iteration
+count, not scale**:
+
+- **Single-shot OOD-scale injection** (cross-model graft, 1 shot at
+  10.76× L2 ratio) → fully absorbed by the receiver, no measurable
+  effect on accuracy.
+- **Iterated OOD-scale feedback** (LatentMAS, 40 steps × 150× L2
+  ratio) → 6% catastrophic mode collapse without norm rescaling.
+
+The same model that absorbs an 11× orthogonal perturbation in one
+shot breaks down under 40 iterations of constant 150× mismatch. The
+mediating variable is iteration count, not the per-step magnitude.
+This is the regime boundary; see MILESTONE-15 for synthesis.
 
 These remain open for future research. The audit's main goals (3 bugs
 identified + fixed + scale-validated) are intact.
